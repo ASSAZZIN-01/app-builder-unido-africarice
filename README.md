@@ -10,6 +10,10 @@ This repo contains tools to export the AfricaRice winning model to ONNX and vali
 bash install.sh
 ```
 
+**Important:** The requirements pin `onnx==1.15.0` to ensure exported models use IR version 9, which is compatible with mobile ONNX Runtime. Do not upgrade onnx beyond 1.15.x.
+
+For more details on mobile compatibility, see [MOBILE_COMPATIBILITY.md](MOBILE_COMPATIBILITY.md).
+
 2) Activate your environment (example):
 
 ```

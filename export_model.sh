@@ -11,6 +11,19 @@ fi
 
 cd "$WORK_DIR"
 
+# Check ONNX version for mobile compatibility
+onnx_version=$(python -c "import onnx; print(onnx.__version__)" 2>/dev/null || echo "unknown")
+if [[ "$onnx_version" != 1.15.* ]] && [[ "$onnx_version" != 1.14.* ]]; then
+  echo "WARNING: onnx version is $onnx_version"
+  echo "For mobile compatibility (IR version 9), onnx 1.15.x or 1.14.x is recommended."
+  echo "The current version may produce IR version 10 models that won't load on mobile."
+  read -r -p "Continue anyway? [y/N]: " proceed
+  if [[ "$proceed" != "y" && "$proceed" != "Y" ]]; then
+    echo "Aborted. Please run: pip install onnx==1.15.0"
+    exit 1
+  fi
+fi
+
 echo "Select export option:"
 echo "1) Export ONNX (FP32)"
 echo "2) Export ONNX FP16"

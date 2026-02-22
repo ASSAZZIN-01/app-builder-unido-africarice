@@ -1,3 +1,6 @@
+# NOTE: This script requires onnx==1.15.0 to produce IR version 9 models,
+# which are compatible with mobile ONNX Runtime. Do not use onnx >= 1.16.0.
+
 import argparse
 import os
 
@@ -47,7 +50,7 @@ def main() -> int:
         args.output,
         export_params=True,
         opset_version=18,
-        do_constant_folding=True,
+        do_constant_folding=False,
         input_names=["tiles", "meta"],
         output_names=["counts", "measures"],
         dynamic_axes={
@@ -56,6 +59,7 @@ def main() -> int:
             "counts": {0: "batch"},
             "measures": {0: "batch"},
         },
+        dynamo=False,
     )
 
     print(f"FP16 model exported to: {args.output}")
