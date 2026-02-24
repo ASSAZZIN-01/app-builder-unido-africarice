@@ -90,18 +90,50 @@ def main() -> int:
     test_df = pd.read_csv(Config.TEST_CSV)
     session = create_session()
 
+    # Inspect model inputs to determine expected tile spatial size and input names.
+    inputs = session.get_inputs()
+    # Find the tiles input (expected rank 5: [batch, n_tiles, 3, H, W])
+    tiles_input = None
+    meta_input = None
+    for inp in inputs:
+        if hasattr(inp, "shape") and len(inp.shape) == 5:
+            tiles_input = inp
+        elif hasattr(inp, "shape") and len(inp.shape) == 2:
+            meta_input = inp
+
+    # Determine tile H/W from model input if statically set, otherwise fall back to Config.TILE_SIZE
+    expected_tile_size = Config.TILE_SIZE
+    if tiles_input is not None:
+        _, _, _, h, w = tiles_input.shape
+        try:
+            if isinstance(h, int) and isinstance(w, int):
+                expected_tile_size = int(h)
+        except Exception:
+            pass
+
+    # helper to get actual input names to feed
+    tiles_name = tiles_input.name if tiles_input is not None else "tiles"
+    meta_name = meta_input.name if meta_input is not None else "meta"
+
     results = []
     for _, row in tqdm(test_df.iterrows(), total=len(test_df)):
         img_path = os.path.join(Config.IMAGE_DIR, f"{row['ID']}.png")
         image = np.array(Image.open(img_path).convert("RGB"))
         tiles = get_tiles(image)
 
-        tile_tensors = np.stack([resize_tile(t) for t in tiles], axis=0)
+        # resize tiles to the model's expected spatial size
+        def _resize_to_expected(tile):
+            pil = Image.fromarray(tile)
+            pil = pil.resize((expected_tile_size, expected_tile_size), resample=Image.BILINEAR)
+            arr = np.array(pil, dtype=np.float32)
+            return np.transpose(arr, (2, 0, 1))
+
+        tile_tensors = np.stack([_resize_to_expected(t) for t in tiles], axis=0)
         tile_tensors = np.expand_dims(tile_tensors, axis=0).astype(np.float32)
 
         meta = build_meta(row.get("Comment", ""))
 
-        outputs = session.run(None, {"tiles": tile_tensors, "meta": meta})
+        outputs = session.run(None, {tiles_name: tile_tensors, meta_name: meta})
         counts, measures = outputs[0], outputs[1]
 
         counts = counts[0]
