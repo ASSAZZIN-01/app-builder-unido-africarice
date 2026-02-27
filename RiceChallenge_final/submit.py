@@ -19,12 +19,12 @@ class Config:
     DATA_DIR = os.path.join(SCRIPT_DIR, 'Data')
     IMAGE_DIR = os.path.join(DATA_DIR, 'images', 'images')
     TEST_CSV = os.path.join(DATA_DIR, 'Test.csv')
-    CHECKPOINT = 'ultimate_tiled_multitask.pth'
+    CHECKPOINT = 'ultimate_tiled_multitask_mobile.pth'
     
-    MODEL_NAME = 'convnext_small.fb_in22k_ft_in1k_384'
-    TILE_SIZE = 512
-    GRID_COLS = 8
-    GRID_ROWS = 6
+    MODEL_NAME = 'convnextv2_nano.fcmae_ft_in22k_in1k_384'  # ~28M params (was convnext_small ~50M)
+    TILE_SIZE = 256  # Keep proven tile size
+    GRID_COLS = 5    # Reduced from 8 (fewer tiles = less memory)
+    GRID_ROWS = 4    # Reduced from 6
     N_TILES = GRID_COLS * GRID_ROWS
     
     COUNT_COLS = ['Count', 'Broken_Count', 'Long_Count', 'Medium_Count', 'Black_Count',

@@ -1,3 +1,4 @@
+import argparse
 import os
 import numpy as np
 import pandas as pd
@@ -11,7 +12,7 @@ class Config:
     DATA_DIR = os.path.join(SCRIPT_DIR, "Data")
     IMAGE_DIR = os.path.join(DATA_DIR, "images", "images")
     TEST_CSV = os.path.join(DATA_DIR, "Test.csv")
-    ONNX_MODEL = os.path.join(SCRIPT_DIR, "ultimate_tiled_multitask.onnx")
+    ONNX_MODEL = os.path.join(SCRIPT_DIR, "ultimate_tiled_multitask_fp16.onnx")
 
     TILE_SIZE = 512
     GRID_COLS = 8
@@ -40,7 +41,6 @@ class Config:
 
 
 def get_tiles(image: np.ndarray) -> list:
-    """Split an image into a fixed 8x6 grid of tiles."""
     h, w, _ = image.shape
     step_h = h // Config.GRID_ROWS
     step_w = w // Config.GRID_COLS
@@ -55,93 +55,120 @@ def get_tiles(image: np.ndarray) -> list:
     return tiles
 
 
-def resize_tile(tile: np.ndarray) -> np.ndarray:
-    """Resize a tile to the fixed input size and return CHW float32."""
-    pil_img = Image.fromarray(tile)
-    pil_img = pil_img.resize((Config.TILE_SIZE, Config.TILE_SIZE), resample=Image.BILINEAR)
-    arr = np.array(pil_img, dtype=np.float32)
-    arr = np.transpose(arr, (2, 0, 1))
-    return arr
-
-
-def build_meta(comment: str) -> np.ndarray:
-    """Build one-hot rice type meta vector from the Comment field."""
+def build_meta(comment: str, dtype) -> np.ndarray:
     rice_type = {"Paddy": 0, "White": 1, "Brown": 2}.get(comment, 0)
-    meta = np.zeros((1, 3), dtype=np.float32)
+    meta = np.zeros((1, 3), dtype=dtype)
     meta[0, rice_type] = 1.0
     return meta
 
 
-def create_session() -> ort.InferenceSession:
-    """Create ONNX Runtime session with best available providers."""
+def create_session(model_path: str) -> ort.InferenceSession:
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     available = ort.get_available_providers()
     providers = [p for p in providers if p in available]
     if not providers:
         providers = ["CPUExecutionProvider"]
-    return ort.InferenceSession(Config.ONNX_MODEL, providers=providers)
+    print(f"Using providers: {providers}")
+    return ort.InferenceSession(model_path, providers=providers)
 
 
 def main() -> int:
-    if not os.path.exists(Config.ONNX_MODEL):
-        print(f"ONNX model not found: {Config.ONNX_MODEL}")
+    parser = argparse.ArgumentParser(description="Run ONNX inference on rice images")
+    parser.add_argument("--model", default=Config.ONNX_MODEL, help="Path to ONNX model")
+    parser.add_argument("--output", default="submission_onnx.csv", help="Output CSV file")
+    parser.add_argument("--test-csv", default=Config.TEST_CSV, help="Test CSV file")
+    parser.add_argument("--image-dir", default=Config.IMAGE_DIR, help="Image directory")
+    parser.add_argument("--limit", type=int, default=0, help="Limit number of images (0=all)")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.model):
+        print(f"ONNX model not found: {args.model}")
         return 1
 
-    test_df = pd.read_csv(Config.TEST_CSV)
-    session = create_session()
+    print(f"Using model: {args.model}")
 
-    # Inspect model inputs to determine expected tile spatial size and input names.
+    test_df = pd.read_csv(args.test_csv)
+    if args.limit > 0:
+        print(f"Limiting to first {args.limit} images")
+        test_df = test_df.head(args.limit)
+
+    session = create_session(args.model)
+
     inputs = session.get_inputs()
-    # Find the tiles input (expected rank 5: [batch, n_tiles, 3, H, W])
+
     tiles_input = None
     meta_input = None
+
     for inp in inputs:
         if hasattr(inp, "shape") and len(inp.shape) == 5:
             tiles_input = inp
         elif hasattr(inp, "shape") and len(inp.shape) == 2:
             meta_input = inp
 
-    # Determine tile H/W from model input if statically set, otherwise fall back to Config.TILE_SIZE
-    expected_tile_size = Config.TILE_SIZE
-    if tiles_input is not None:
-        _, _, _, h, w = tiles_input.shape
-        try:
-            if isinstance(h, int) and isinstance(w, int):
-                expected_tile_size = int(h)
-        except Exception:
-            pass
-
-    # helper to get actual input names to feed
     tiles_name = tiles_input.name if tiles_input is not None else "tiles"
     meta_name = meta_input.name if meta_input is not None else "meta"
 
+    # ---------------------------------------------------------
+    # Detect input dtype from the ONNX model
+    # ---------------------------------------------------------
+    # inp.type is e.g. "tensor(float16)" or "tensor(float)"
+    input_type_str = tiles_input.type if tiles_input is not None else ""
+    if "float16" in input_type_str:
+        input_dtype = np.float16
+        print("Model expects FP16 inputs")
+    else:
+        input_dtype = np.float32
+        print("Model expects FP32 inputs")
+
+    # Determine tile size
+    expected_tile_size = Config.TILE_SIZE
+    if tiles_input is not None:
+        _, _, _, h, w = tiles_input.shape
+        if isinstance(h, int) and isinstance(w, int):
+            expected_tile_size = int(h)
+
     results = []
+
     for _, row in tqdm(test_df.iterrows(), total=len(test_df)):
-        img_path = os.path.join(Config.IMAGE_DIR, f"{row['ID']}.png")
+
+        img_path = os.path.join(args.image_dir, f"{row['ID']}.png")
         image = np.array(Image.open(img_path).convert("RGB"))
         tiles = get_tiles(image)
 
-        # resize tiles to the model's expected spatial size
         def _resize_to_expected(tile):
             pil = Image.fromarray(tile)
-            pil = pil.resize((expected_tile_size, expected_tile_size), resample=Image.BILINEAR)
+            pil = pil.resize(
+                (expected_tile_size, expected_tile_size),
+                resample=Image.BILINEAR,
+            )
             arr = np.array(pil, dtype=np.float32)
             return np.transpose(arr, (2, 0, 1))
 
-        tile_tensors = np.stack([_resize_to_expected(t) for t in tiles], axis=0)
-        tile_tensors = np.expand_dims(tile_tensors, axis=0).astype(np.float32)
+        tile_tensors = np.stack(
+            [_resize_to_expected(t) for t in tiles], axis=0
+        )
+        tile_tensors = np.expand_dims(tile_tensors, axis=0).astype(input_dtype)
 
-        meta = build_meta(row.get("Comment", ""))
+        meta = build_meta(row.get("Comment", ""), input_dtype)
 
-        outputs = session.run(None, {tiles_name: tile_tensors, meta_name: meta})
+        outputs = session.run(
+            None,
+            {
+                tiles_name: tile_tensors,
+                meta_name: meta,
+            },
+        )
+
         counts, measures = outputs[0], outputs[1]
 
         counts = counts[0]
         measures = measures[0]
 
         res_row = {"ID": row["ID"]}
+
         for i, col in enumerate(Config.COUNT_COLS):
             res_row[col] = max(0, int(round(float(counts[i]))))
+
         for i, col in enumerate(Config.MEASURE_COLS):
             res_row[col] = float(measures[i])
 
@@ -150,8 +177,9 @@ def main() -> int:
     out_df = pd.DataFrame(results)
     cols = ["ID"] + Config.COUNT_COLS + Config.MEASURE_COLS
     out_df = out_df[cols]
-    out_df.to_csv("submission_onnx.csv", index=False)
-    print("Submission saved to submission_onnx.csv")
+    out_df.to_csv(args.output, index=False)
+
+    print(f"Submission saved to {args.output}")
     return 0
 
 

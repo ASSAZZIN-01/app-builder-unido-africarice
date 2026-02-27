@@ -1,6 +1,7 @@
 # NOTE: This script requires onnx==1.15.0 to produce IR version 9 models,
 # which are compatible with mobile ONNX Runtime. Do not use onnx >= 1.16.0.
 
+import argparse
 import os
 import sys
 import torch
@@ -71,26 +72,67 @@ class ExportWrapper(nn.Module):
 
 
 def main() -> int:
-    checkpoint_path = os.path.join(Config.SCRIPT_DIR, Config.CHECKPOINT)
+    parser = argparse.ArgumentParser(description="Export PyTorch model to ONNX")
+    parser.add_argument(
+        "--checkpoint",
+        default=os.path.join(Config.SCRIPT_DIR, Config.CHECKPOINT),
+        help="Path to PyTorch checkpoint (.pth)",
+    )
+    parser.add_argument(
+        "--output",
+        default=os.path.join(Config.SCRIPT_DIR, "ultimate_tiled_multitask.onnx"),
+        help="Output ONNX model path",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=Config.TILE_SIZE,
+        help="Tile size for export (must match training)",
+    )
+    parser.add_argument(
+        "--grid-cols",
+        type=int,
+        default=Config.GRID_COLS,
+        help="Number of grid columns (must match training)",
+    )
+    parser.add_argument(
+        "--grid-rows",
+        type=int,
+        default=Config.GRID_ROWS,
+        help="Number of grid rows (must match training)",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=Config.MODEL_NAME,
+        help="Model architecture name (must match training)",
+    )
+    args = parser.parse_args()
+    
+    checkpoint_path = args.checkpoint
     if not os.path.exists(checkpoint_path):
         print(f"Checkpoint not found: {checkpoint_path}")
         return 1
 
+    print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model = UltimateSpecialist(Config.MODEL_NAME)
+    
+    print(f"Creating model: {args.model_name}")
+    model = UltimateSpecialist(args.model_name)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
     wrapper = ExportWrapper(model, checkpoint["m_stats"][0], checkpoint["m_stats"][1])
     wrapper.eval()
 
+    print(f"Exporting with tile size: {args.tile_size}, grid: {args.grid_cols}×{args.grid_rows}")
+    
     # Use the same preprocessing tile size as training (`Config.TILE_SIZE`) to
     # preserve behavior exactly as in `submit.py`. To reduce memory pressure
     # during tracing, keep the dummy `n_tiles` small (1) while marking the
     # tiles axis dynamic so the exported model accepts the full tile count at
     # runtime.
     export_n_tiles = 1
-    export_tile_size = Config.TILE_SIZE
+    export_tile_size = args.tile_size
     dummy_tiles = torch.zeros(
         1,
         export_n_tiles,
@@ -101,7 +143,7 @@ def main() -> int:
     )
     dummy_meta = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
 
-    onnx_path = os.path.join(Config.SCRIPT_DIR, "ultimate_tiled_multitask.onnx")
+    onnx_path = args.output
     torch.onnx.export(
         wrapper,
         (dummy_tiles, dummy_meta),
